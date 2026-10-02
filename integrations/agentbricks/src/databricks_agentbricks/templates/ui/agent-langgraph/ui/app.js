@@ -992,24 +992,6 @@ async function refreshSessionView({ hydrateChat = false } = {}) {
   await refreshSessions();
 }
 
-async function recordSessionItems(items, { refresh = true } = {}) {
-  if (!state.config?.session.managed || !items.length) return;
-  try {
-    const sessionId = await ensureManagedSession();
-    const response = await fetch(demoUrl("/api/demo/session/items"), {
-      method: "POST",
-      headers: { "Content-Type": "application/json", ...routingHeaders() },
-      body: JSON.stringify({ items }),
-    });
-    const result = await jsonResponse(response);
-    addEvent("session.items.append", result);
-    if (refresh) await refreshSessionView();
-  } catch (error) {
-    stateMessage(elements.sessionItems, error instanceof Error ? error.message : String(error), "error");
-    addEvent("session.error", { message: String(error) });
-  }
-}
-
 async function invokeSync(payload) {
   const response = await fetch("/api/invocations", {
     method: "POST",
@@ -1151,7 +1133,6 @@ async function invokeBackground(payload) {
   const started = await jsonResponse(response);
   addEvent("background.started", started);
   state.backgroundRun = started.id;
-  state.backgroundMessages = payload.messages || [];
   document.querySelector("#background-run").hidden = false;
   const link = document.querySelector("#background-run-link");
   link.href = `/api/invocations/${encodeURIComponent(started.id)}`;
@@ -1178,16 +1159,7 @@ async function sendText(text, mode = state.mode) {
   try {
     const result = await dispatch({ messages: [{ role: "user", content }] }, mode);
     if (result?.status === "waiting") return "";
-    const items = [{ role: "user", content, transport: mode, instance_id: state.instanceId }];
-    if (state.lastAssistantText) {
-      items.push({
-        role: "assistant",
-        content: state.lastAssistantText,
-        transport: mode,
-        instance_id: state.instanceId,
-      });
-    }
-    await recordSessionItems(items);
+    await refreshSessionView();
     return state.lastAssistantText;
   } catch (error) {
     state.backgroundWaiting = false;
@@ -1214,18 +1186,7 @@ async function resume(decision) {
   setBusy(true, "Resuming");
   try {
     await dispatch(payload, "streaming");
-    const items = [
-      { role: "human_decision", content: decision, instance_id: state.instanceId },
-    ];
-    if (state.lastAssistantText) {
-      items.push({
-        role: "assistant",
-        content: state.lastAssistantText,
-        transport: "streaming",
-        instance_id: state.instanceId,
-      });
-    }
-    await recordSessionItems(items);
+    await refreshSessionView();
   } catch (error) {
     appendError(error);
   } finally {
@@ -1501,9 +1462,6 @@ document.querySelector("#background-wait-toggle").addEventListener("click", asyn
   try {
     const result = await pollBackground(state.backgroundRun);
     if (result.status === "waiting") return;
-    const items = [...(state.backgroundMessages || [])];
-    if (state.lastAssistantText) items.push({ role: "assistant", content: state.lastAssistantText, transport: "background", instance_id: state.instanceId });
-    await recordSessionItems(items, { refresh: false });
     await refreshSessionView();
   } catch (error) {
     state.backgroundWaiting = false;
