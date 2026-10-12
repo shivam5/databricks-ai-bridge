@@ -16,9 +16,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - label: main
+          - label: main-mcp1
             ref: 5aeda51511c0fc2ecc052d3ba4cd65c08b8a3801
-          - label: pr-704
+          - label: pr-704-mcp1
             ref: 7876b04c164c3c47bab19d0d5fd3c6123e3717ac
     env:
       UV_NO_CONFIG: "true"
@@ -34,6 +34,18 @@ jobs:
           version: "0.9.11"
           python-version: "3.12"
           enable-cache: false
+      - name: Apply proposed one-line MCP compatibility bound
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path("integrations/agentbricks/src/databricks_agentbricks/templates/custom-agent-langgraph/pyproject.toml")
+          source = path.read_text()
+          anchor = '    "databricks-langchain==0.21.0",\n'
+          assert source.count(anchor) == 1
+          path.write_text(source.replace(anchor, anchor + '    "mcp<2",\n'))
+          PY
+          git diff -- integrations/agentbricks/src/databricks_agentbricks/templates/custom-agent-langgraph/pyproject.toml
       - name: Build wheels and run exact functional case
         working-directory: integrations/agentbricks
         shell: bash
@@ -69,7 +81,7 @@ jobs:
           root = Path(os.environ["RUNNER_TEMP"])
           output = root / "diagnostic-output"
           output.mkdir(exist_ok=True)
-          names = {"mcp", "langchain-mcp-adapters", "databricks-langchain"}
+          names = {"mcp", "langchain-mcp-adapters", "databricks-langchain", "databricks-agentbricks", "databricks-ai-bridge"}
           evidence = {}
           for lock in (root / "diagnostic-scaffold").glob("*/agent/uv.lock"):
               shutil.copyfile(lock, output / "scaffold-uv.lock")
@@ -79,7 +91,11 @@ jobs:
               ]
               for site in (lock.parent / ".venv/lib").glob("python*/site-packages"):
                   evidence["installed"] = {
-                      dist.metadata["Name"]: {"version": dist.version, "requires_dist": dist.requires}
+                      dist.metadata["Name"]: {
+                          "version": dist.version,
+                          "requires_dist": dist.requires,
+                          "direct_url": json.loads(dist.read_text("direct_url.json") or "null"),
+                      }
                       for dist in importlib.metadata.distributions(path=[str(site)])
                       if dist.metadata["Name"] in names
                   }
