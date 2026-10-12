@@ -1,0 +1,97 @@
+name: ML-70510 public dependency diagnostic
+
+on:
+  push:
+    branches: [codex/ml-70510-ci-deps-20261012]
+
+permissions:
+  contents: read
+
+jobs:
+  custom-langgraph:
+    name: Custom LangGraph (${{ matrix.label }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: main
+            ref: 5aeda51511c0fc2ecc052d3ba4cd65c08b8a3801
+          - label: pr-704
+            ref: 7876b04c164c3c47bab19d0d5fd3c6123e3717ac
+    env:
+      UV_NO_CONFIG: "true"
+      UV_DEFAULT_INDEX: https://pypi.org/simple
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          repository: shivam5/databricks-ai-bridge
+          ref: ${{ matrix.ref }}
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff
+        with:
+          version: "0.9.11"
+          python-version: "3.12"
+          enable-cache: false
+      - name: Build wheels and run exact functional case
+        working-directory: integrations/agentbricks
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/diagnostic-output"
+          git rev-parse HEAD
+          uv --version
+          uv build --wheel --out-dir dist ../..
+          uv build --wheel --out-dir dist
+          uv venv .venv-functional
+          uv pip install --python .venv-functional/bin/python --no-sources \
+            "$(ls dist/databricks_ai_bridge-*.whl)" \
+            "$(ls dist/databricks_agentbricks-*.whl)" --group tests
+          AI_BRIDGE_WHEEL="$(ls "$PWD"/dist/databricks_ai_bridge-*.whl)" \
+          AGENTBRICKS_WHEEL="$(ls "$PWD"/dist/databricks_agentbricks-*.whl)" \
+            .venv-functional/bin/pytest -vv \
+            'tests/functional/dev_runtime_test.py::test_scaffolded_agent_boots_and_answers_locally[custom-False-langgraph]' \
+            --basetemp "$RUNNER_TEMP/diagnostic-scaffold" \
+            2>&1 | tee "$RUNNER_TEMP/diagnostic-output/pytest.log"
+      - name: Preserve generated dependency evidence
+        if: always()
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import importlib.metadata
+          import json
+          import os
+          from pathlib import Path
+          import shutil
+          import tomllib
+
+          root = Path(os.environ["RUNNER_TEMP"])
+          output = root / "diagnostic-output"
+          output.mkdir(exist_ok=True)
+          names = {"mcp", "langchain-mcp-adapters", "databricks-langchain"}
+          evidence = {}
+          for lock in (root / "diagnostic-scaffold").glob("*/agent/uv.lock"):
+              shutil.copyfile(lock, output / "scaffold-uv.lock")
+              evidence["lock_packages"] = [
+                  package for package in tomllib.loads(lock.read_text())["package"]
+                  if package["name"] in names
+              ]
+              for site in (lock.parent / ".venv/lib").glob("python*/site-packages"):
+                  evidence["installed"] = {
+                      dist.metadata["Name"]: {"version": dist.version, "requires_dist": dist.requires}
+                      for dist in importlib.metadata.distributions(path=[str(site)])
+                      if dist.metadata["Name"] in names
+                  }
+          for server_log in (root / "diagnostic-scaffold").glob("*/server.log"):
+              shutil.copyfile(server_log, output / "server.log")
+          text = json.dumps(evidence, indent=2)
+          (output / "dependencies.json").write_text(text + "\n")
+          print(text)
+          PY
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4
+        if: always()
+        with:
+          name: ml-70510-dependencies-${{ matrix.label }}
+          path: ${{ runner.temp }}/diagnostic-output
+          retention-days: 7
